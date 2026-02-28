@@ -55,7 +55,7 @@ def read_from_file(path):
     session_rate = _parse_header(blocks, unxored_data, endian_prefix)
     audio_files = _parse_audio(blocks, unxored_data, version, endian_prefix)
     regions, tracks = _parse_rest(blocks, unxored_data, audio_files, endian_prefix)
-    # TODO: the actual stuff
+    # TODO @splidje: the actual stuff
 
 
 def _unxor_file(path):
@@ -242,7 +242,7 @@ def _parse_rest(
                     region_name,
                     unxored_data,
                     j,
-                    child_block,
+                    child_block.children[0],
                     audio_files,
                     endian_prefix,
                 )
@@ -266,6 +266,7 @@ def _parse_rest(
             for _ in range(channel_count):
                 track_index = _u_endian_read2(unxored_data, j, endian_prefix)
                 if track_index >= len(tracks):
+                    # Add a dummy region for now
                     tracks.append(Track(track_index, track_name, Region(65535)))
                 j += 2
 
@@ -292,14 +293,12 @@ def _parse_rest(
                             continue
 
                         j = greatgrandchild_block.offset + 4
-                        if (
-                            not track
-                            or _u_endian_read4(unxored_data, j, endian_prefix)
-                            >= len(regions)
-                            or track.region.index == 65535
-                        ):
+                        region_index = _u_endian_read4(unxored_data, j, endian_prefix)
+                        if not track or region_index >= len(regions):
                             continue
 
+                        track = copy(track)
+                        track.region = copy(regions[region_index])
                         tracks.append(track)
         elif block.content_type == 0x1054:
             track_iter = iter(tracks)
@@ -325,21 +324,26 @@ def _parse_rest(
                             continue
 
                         j = greatgrandchild_block.offset + 4
-                        raw_index = _u_endian_read4(unxored_data, j, endian_prefix)
+                        region_index = _u_endian_read4(unxored_data, j, endian_prefix)
                         j += 4 + 1
                         start = _u_endian_read4(unxored_data, j, endian_prefix)
-                        if not track or raw_index >= len(regions):
+                        if not track:
+                            print(f"dropped track {len(tracks)}")
+                            continue
+
+                        if region_index >= len(regions):
+                            print(f"dropped region {region_index}")
                             continue
 
                         track = copy(track)
-                        track.region = copy(track.region)
+                        track.region = copy(regions[region_index])
                         track.region.start_pos = start
                         if track.region.index != 65535:
                             tracks.append(track)
 
     tracks = list(filter(lambda track: track.region.index != 65535, tracks))
     if not tracks:
-        return tracks
+        return regions, tracks
 
     tracks.sort(key=lambda track: track.index)
 

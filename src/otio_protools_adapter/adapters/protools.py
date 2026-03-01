@@ -56,6 +56,7 @@ def read_from_file(path):
     audio_files = _parse_audio(blocks, unxored_data, version, endian_prefix)
     regions, tracks = _parse_rest(blocks, unxored_data, audio_files, endian_prefix)
     # TODO @splidje: the actual stuff
+    return audio_files, regions, tracks
 
 
 def _unxor_file(path):
@@ -234,7 +235,10 @@ def _parse_rest(
 
             j = child_block.offset + 11
             region_name = _parse_string(unxored_data, j, endian_prefix)
-            j += len(region_name) + 4
+            j += (
+                len(region_name) + 5
+            )  # decided this should really include the null terminator
+            # to at least help me get my head around it @splidje
 
             regions.append(
                 _parse_region_info(
@@ -251,10 +255,13 @@ def _parse_rest(
     # parse tracks
     tracks: list[Track] = []
     for block in blocks:
+        # I think the idea is there's only one.
+        # one block telling us about all the tracks
         if block.content_type != 0x1015:
             continue
 
         for child_block in block.children:
+            # then there's a child block per track?
             if child_block.content_type != 0x1014:
                 continue
 
@@ -384,7 +391,7 @@ def _parse_region_info(
     endian_prefix,
 ):
     region = Region(index, name)
-    region.start_pos, region.sample_offset, region.length = _parse_three_point(
+    region.sample_offset, region.length, region.start_pos = _parse_three_point(
         unxored_data, j, endian_prefix
     )
 
@@ -403,59 +410,73 @@ def _parse_region_info(
 
 
 def _parse_three_point(unxored_data, j, endian_prefix):
+    # I've changed this quite a bit from what I read in
+    # pformat. Based on seeing 00 30 44 00
+    # the second 4 in 44 I felt was suspicious. Why
+    # wouldn't it be 0 if we're to disregard it?
+    # So this is based on skipping the first 00
+    # then taking both nibbles: 3, 0
+    # then both of the next: 4, 4
+    # then skipping the next 00
+    # four fields of length 3, 0, 4, 4
+    # I guess the first is length? second source offset?
+    # third and fourth ... start pos in timeline? (getting
+    # large numbers though) - @splidje
     if endian_prefix == ">":
-        sample_offset_bytes = (unxored_data[j + 4] & 0xF0) >> 4
-        length_bytes = (unxored_data[j + 3] & 0xF0) >> 4
-        start_bytes = (unxored_data[j + 2] & 0xF0) >> 4
+        length_bytes = (unxored_data[j + 2]) & 0xF
+        sample_offset_bytes = (unxored_data[j + 2] >> 4) & 0xF
+        start_bytes = (unxored_data[j + 1]) & 0xF
     else:
-        sample_offset_bytes = (unxored_data[j + 1] & 0xF0) >> 4
-        length_bytes = (unxored_data[j + 2] & 0xF0) >> 4
-        start_bytes = (unxored_data[j + 3] & 0xF0) >> 4
+        length_bytes = (unxored_data[j + 1] >> 4) & 0xF
+        sample_offset_bytes = (unxored_data[j + 1]) & 0xF
+        start_bytes = (unxored_data[j + 2] >> 4) & 0xF
+
+    j += 4
 
     if sample_offset_bytes == 5:
-        sample_offset = _u_endian_read5(unxored_data, j + 5, endian_prefix)
+        sample_offset = _u_endian_read5(unxored_data, j, endian_prefix)
     elif sample_offset_bytes == 4:
-        sample_offset = _u_endian_read4(unxored_data, j + 5, endian_prefix)
+        sample_offset = _u_endian_read4(unxored_data, j, endian_prefix)
     elif sample_offset_bytes == 3:
-        sample_offset = _u_endian_read3(unxored_data, j + 5, endian_prefix)
+        sample_offset = _u_endian_read3(unxored_data, j, endian_prefix)
     elif sample_offset_bytes == 2:
-        sample_offset = _u_endian_read2(unxored_data, j + 5, endian_prefix)
+        sample_offset = _u_endian_read2(unxored_data, j, endian_prefix)
     elif sample_offset_bytes == 1:
-        sample_offset = unxored_data[j + 5]
+        sample_offset = unxored_data[j]
     else:
         sample_offset = 0
 
     j += sample_offset_bytes
 
     if length_bytes == 5:
-        length = _u_endian_read5(unxored_data, j + 5, endian_prefix)
+        length = _u_endian_read5(unxored_data, j, endian_prefix)
     elif length_bytes == 4:
-        length = _u_endian_read4(unxored_data, j + 5, endian_prefix)
+        length = _u_endian_read4(unxored_data, j, endian_prefix)
     elif length_bytes == 3:
-        length = _u_endian_read3(unxored_data, j + 5, endian_prefix)
+        length = _u_endian_read3(unxored_data, j, endian_prefix)
     elif length_bytes == 2:
-        length = _u_endian_read2(unxored_data, j + 5, endian_prefix)
+        length = _u_endian_read2(unxored_data, j, endian_prefix)
     elif length_bytes == 1:
-        length = unxored_data[j + 5]
+        length = unxored_data[j]
     else:
         length = 0
 
     j += length_bytes
 
     if start_bytes == 5:
-        start = _u_endian_read5(unxored_data, j + 5, endian_prefix)
+        start = _u_endian_read5(unxored_data, j, endian_prefix)
     elif start_bytes == 4:
-        start = _u_endian_read4(unxored_data, j + 5, endian_prefix)
+        start = _u_endian_read4(unxored_data, j, endian_prefix)
     elif start_bytes == 3:
-        start = _u_endian_read3(unxored_data, j + 5, endian_prefix)
+        start = _u_endian_read3(unxored_data, j, endian_prefix)
     elif start_bytes == 2:
-        start = _u_endian_read2(unxored_data, j + 5, endian_prefix)
+        start = _u_endian_read2(unxored_data, j, endian_prefix)
     elif start_bytes == 1:
-        start = unxored_data[j + 5]
+        start = unxored_data[j]
     else:
         start = 0
 
-    return start, sample_offset, length
+    return sample_offset, length, start
 
 
 def _parse_block_at(unxored_data, pos, parent, level, endian_prefix):

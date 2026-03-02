@@ -1,6 +1,10 @@
 import struct
 
+from collections import defaultdict
 from copy import copy
+from pathlib import Path
+
+import opentimelineio as otio
 
 _UNENCRYPTED_LENGTH = 20
 _BITCODE = b"0010111100101011"
@@ -43,7 +47,7 @@ class Track:
         self.region = region
 
 
-# TODO @splidje: not quite working yet.
+# TODO(@splidje): not quite working yet.
 # I might have made a few mistakes reading the code I'm basing this on
 def read_from_file(path):
     unxored_data = _unxor_file(path)
@@ -55,8 +59,68 @@ def read_from_file(path):
     session_rate = _parse_header(blocks, unxored_data, endian_prefix)
     audio_files = _parse_audio(blocks, unxored_data, version, endian_prefix)
     regions, tracks = _parse_rest(blocks, unxored_data, audio_files, endian_prefix)
-    # TODO @splidje: the actual stuff
-    return audio_files, regions, tracks
+
+    timeline = otio.schema.Timeline(name=Path(path).stem)
+
+    missing_reference_by_file_name = {}
+    otio_track_by_index = {}
+
+    regions_by_track = defaultdict(list)
+    for track in tracks:
+        if track.index in otio_track_by_index:
+            otio_track = otio_track_by_index[track.index]
+        else:
+            otio_track = otio_track_by_index[track.index] = otio.schema.Track(
+                name=track.name, kind="Audio"
+            )
+            timeline.tracks.append(otio_track)
+        if track.region.audio_file.file_name not in missing_reference_by_file_name:
+            missing_reference_by_file_name[track.region.audio_file.file_name] = (
+                otio.schema.MissingReference(name=track.region.audio_file.file_name)
+            )
+        missing_reference = missing_reference_by_file_name[
+            track.region.audio_file.file_name
+        ]
+        source_start_time = otio.opentime.RationalTime(
+            track.region.sample_offset, session_rate
+        )
+        start_time_in_track = otio.opentime.RationalTime(
+            track.region.start_pos, session_rate
+        )
+        gap_duration = start_time_in_track - otio_track.duration()
+        if gap_duration.value > 0:
+            otio_track.append(duration=gap_duration)
+        elif gap_duration.value < 0:
+            # TODO(@splidje): assumption being made here that
+            # the regions come in time order
+            overlapped_clips = otio_track.children_in_range(
+                otio.opentime.TimeRange(start_time_in_track, gap_duration)
+            )
+            for wiped_clip in overlapped_clips[1:]:
+                otio_track.remove(wiped_clip)
+            if overlapped_clips:
+                overlapped_clips[0].source_range = overlapped_clips[
+                    0
+                ].source_range.duration_extended_by(gap_duration)
+        otio_track.append(
+            otio.schema.Clip(
+                name=track.region.name,
+                media_reference=missing_reference,
+                source_range=otio.opentime.TimeRange(
+                    source_start_time,
+                    otio.opentime.RationalTime(
+                        min(
+                            track.region.length,
+                            track.region.audio_file.length - track.region.sample_offset,
+                        ),
+                        session_rate,
+                    ),
+                ),
+            )
+        )
+        regions_by_track[tracks[track.index]].append(track.region)
+
+    return timeline
 
 
 def _unxor_file(path):
